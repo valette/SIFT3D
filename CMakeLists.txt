@@ -218,3 +218,9 @@ endif ()
 if (BUILD_PACKAGE)
         include (SIFT3DPackage)
 endif ()
+
+OPTION(USE_VTK "Build vtk SIFT3D" OFF)
+
+if (USE_VTK)
+		add_subdirectory (VTK)
+endif ()
