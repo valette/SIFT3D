@@ -1,0 +1,29 @@
+{
+	"actions": {
+		"SIFT3D": {
+			"parameters": [
+				{
+					"name": "inputVolume",
+					"type": "file",
+					"required": true
+				},
+				{
+					"prefix": "-s ",
+					"name": "spacing",
+					"type": "float"
+				},
+				{
+					"prefix": "-pt ",
+					"name": "peakThreshold",
+					"type": "float"
+				},
+				{
+					"prefix": "-ct ",
+					"name": "cornerThreshold",
+					"type": "float"
+				}
+			],
+			"executable": "bin/SIFT3D"
+		}
+	}
+}
