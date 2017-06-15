@@ -264,6 +264,7 @@ typedef struct _Keypoint {
 	Mat_rm R;				// Rotation matrix into Keypoint space
 	double xd, yd, zd;			// sub-pixel x, y, z
 	double  sd;				// absolute scale
+	double  rd;				// absolute response
 	int o, s;			        // pyramid indices 
 
 } Keypoint;
@@ -299,7 +300,7 @@ typedef struct _Mesh {
 typedef struct _SIFT3D_Descriptor {
 
 	Hist hists[DESC_NUM_TOTAL_HIST]; // Array of orientation histograms
-	double xd, yd, zd, sd;	// sub-pixel [x, y, z], absolute scale
+	double xd, yd, zd, sd, rd;	// sub-pixel [x, y, z], absolute scale, absolute response
 
 } SIFT3D_Descriptor;
 

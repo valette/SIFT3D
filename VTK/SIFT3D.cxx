@@ -44,6 +44,11 @@ int main( int argc, char *argv[] )
 	}
 
 	SIFT3D sift3d;
+	double spacing[ 3 ];
+	Image imReal;
+	Image *im = &imReal;
+	Keypoint_store kp;
+	SIFT3D_Descriptor_store desc;
 
 	// Initialize the SIFT data 
 	if (init_SIFT3D(&sift3d)) {
@@ -51,9 +56,16 @@ int main( int argc, char *argv[] )
 		exit( 1 );
 	}
 
+	// Initialize data 
+	init_Keypoint_store( &kp ); 
+	init_SIFT3D_Descriptor_store( &desc );
+	init_im( im );
+
 	// Parse optionnal arguments
 	int argumentsIndex = 2;
-	double spacing = 1;
+	double desiredSpacing = -1;
+	int writeCSV = 0;
+	int drawPoints = 0;
 
 	while ( argumentsIndex < argc ) {
 
@@ -62,7 +74,8 @@ int main( int argc, char *argv[] )
 
 		if (strcmp(key, "-s") == 0) {
 
-			spacing = atof( value );
+			desiredSpacing = atof( value );
+			std::cout << "desired spacing : " << desiredSpacing << std::endl;
 
 		}
 
@@ -80,6 +93,21 @@ int main( int argc, char *argv[] )
 
 		}
 
+
+		if (strcmp(key, "-dp") == 0) {
+
+			std::cout << "draw points : " << value << std::endl;
+			drawPoints = atoi( value );
+
+		}
+
+		if (strcmp(key, "-csv") == 0) {
+
+			std::cout << "write csv files : " << value << std::endl;
+			writeCSV = atoi( value );
+
+		}
+
 		argumentsIndex += 2;
 	}
 
@@ -89,7 +117,6 @@ int main( int argc, char *argv[] )
 	vtkRobustImageReader *Reader = vtkRobustImageReader::New();
 	Reader->SetFileName(argv[1]);
 	Reader->Update();
-
 
 	int dimensions[3];
 	Reader->GetOutput()->GetDimensions(dimensions);
@@ -101,40 +128,49 @@ int main( int argc, char *argv[] )
 	cast->SetOutputScalarType( VTK_FLOAT );
 	cast->Update();
 
-	std::cout << "new spacing : " << spacing << std::endl;
+	vtkImageData *resampled;
 
-	vtkImageResample *Resampler=vtkImageResample::New();
-	Resampler->SetInputData( cast->GetOutput() );
-	Resampler->SetOutputSpacing( spacing, spacing, spacing );
-	double *sp = Reader->GetOutput()->GetSpacing();
+	if (desiredSpacing > 0 ) {
 
-	for (int i = 0; i < 3; i++) {
+		std::cout << "new spacing : " << desiredSpacing << std::endl;
 
-		Resampler->SetAxisMagnificationFactor( i, sp[ i ] / spacing );
+		vtkImageResample *Resampler=vtkImageResample::New();
+		Resampler->SetInputData( cast->GetOutput() );
+		double *sp = Reader->GetOutput()->GetSpacing();
 
+		for (int i = 0; i < 3; i++) {
+
+			Resampler->SetAxisMagnificationFactor( i, sp[ i ] / desiredSpacing );
+
+		}
+
+		std::cout << "Resampling...";
+		Resampler->Update();
+		cout<<"...done" << std::endl;
+		resampled = Resampler->GetOutput();
+		vtkNIFTIImageWriter *writer = vtkNIFTIImageWriter::New();
+		writer->SetInputData( resampled );
+		writer->SetFileName( "resampled.nii.gz" );
+		writer->Write();
+
+		resampled->GetDimensions(dimensions);
+		cout << "new dmensions : " << dimensions[ 0 ] << " " << dimensions[1] 
+			<< " " << dimensions[ 2 ] << std::endl;
+	} else {
+
+		resampled = cast->GetOutput();
+		
 	}
 
-	std::cout << "Resampling...";
-	Resampler->Update();
-	cout<<"...done" << std::endl;
-	vtkImageData *resampled=Resampler->GetOutput();
+	resampled->GetDimensions( dimensions );
+	resampled->GetSpacing( spacing );
+	double scaleSpacing = pow( spacing[ 0 ] * spacing[ 1 ] * spacing[ 2 ], 1.0 / 3.0 );
 
-	resampled->GetDimensions(dimensions);
-	cout << "new dmensions : " << dimensions[ 0 ] << " " << dimensions[1] 
-		<< " " << dimensions[ 2 ] << std::endl;
-
-	Image imReal;
-	Image *im = &imReal;
-	Keypoint_store kp;
-	SIFT3D_Descriptor_store desc;
-
-	// Initialize data 
-	init_Keypoint_store(&kp); 
-	init_SIFT3D_Descriptor_store(&desc); 
-	init_im(im);
 
 	// Store the real world coordinates
-	im->ux = im->uy = im->uz = spacing;
+	im->ux = spacing[ 0 ];
+	im->uy = spacing[ 1 ];
+	im->uz = spacing[ 2 ];
 
 	// Resize im    
 	im->nx = dimensions[ 0 ];
@@ -147,27 +183,33 @@ int main( int argc, char *argv[] )
 	// copy data
 	float *in = ( float* ) resampled->GetScalarPointer();
 	float *out = im->data;
-
 	unsigned int nVoxels = dimensions[ 0 ]* dimensions[ 1 ] * dimensions[ 2 ];
+
 	for ( unsigned int i = 0 ; i < nVoxels; i++ ) {
-		out[i] = in[i];
+
+		out[ i ] = in[ i ];
+
 	}
 
-	im_scale(im);
+	im_scale( im );
 
 	// Extract keypoints
 	if (SIFT3D_detect_keypoints(&sift3d, im, &kp)) {
+
 		err_msgu("Failed to detect keypoints.");
 		return 1;
+
 	}
 
 	// Extract descriptors
 	if (SIFT3D_extract_descriptors(&sift3d, &kp,&desc)) {
+
 		err_msgu("Failed to extract descriptors.");
 		return 1;
+
 	}
 
-	if ( 0 ) {
+	if ( writeCSV ) {
 
 		// Optionally write the keypoints 
 		if (write_Keypoint_store( "keys.csv", &kp)) {
@@ -181,7 +223,12 @@ int main( int argc, char *argv[] )
 
 				err_msgu("Failed to write the descriptors");
 				return 1;
+
 		}
+
+	}
+
+	if ( drawPoints ) {
 
 		// Optionally draw the keypoints
 		Image draw;
@@ -206,7 +253,9 @@ int main( int argc, char *argv[] )
 				return 1;
 		}
 
-		draw.ux = draw.uy = draw.uz = spacing;
+		draw.ux = spacing[ 0 ];
+		draw.uy = spacing[ 1 ];
+		draw.uz = spacing[ 2 ];
 
 		// copy data
 		out= ( float* ) resampled->GetScalarPointer();
@@ -223,9 +272,12 @@ int main( int argc, char *argv[] )
 		im_free(&draw);
 	}
 
+
 	float valF;
 	char valC;
-	FILE * file = fopen( "points.bin","wb" );
+
+	ofstream pointsFile;
+	pointsFile.open( "points.csv", std::ofstream::out | std::ofstream::trunc);
 
     Mat_rm mat;
 	int i, i_R, j_R;
@@ -237,50 +289,44 @@ int main( int argc, char *argv[] )
 	double *origin = resampled->GetOrigin();
 
 	std::cout << num_rows << " points" << std::endl;
-	std::cout << DESC_NUM_TOTAL_HIST * NBINS_AZ *  NBINS_PO << " values per descriptor" << std::endl;
-	
+
+	// Initialize the matrix
+	init_Mat_rm(&mat, 0, 0, SIFT3D_FLOAT, SIFT3D_FALSE);
+
+	// Write the data into the matrix 
+	SIFT3D_Descriptor_store_to_Mat_rm(&desc, &mat);
+
 
 	for (i = 0; i < num_rows; i++) {
+//	std::cout << i << " point" << std::endl;
 
-//		const Keypoint *const key = kp.buf + i;
 		const SIFT3D_Descriptor *const des = desc.buf + i;
 
 		// Write the coordinates 
-		valF =  des->xd * spacing + origin[0];
-		fwrite(&valF, sizeof(float), 1, file);
+		pointsFile << des->xd * spacing[ 0 ] + origin[0] << ',';
 
-		valF =  des->yd * spacing + origin[1];
-		fwrite(&valF, sizeof(float), 1, file);
+		pointsFile << des->yd * spacing[ 1 ] + origin[1] << ',';
 
-		valF =  des->yd * spacing + origin[2];
-		fwrite(&valF, sizeof(float), 1, file);
+		pointsFile << des->zd * spacing[ 2 ] + origin[2] << ',';
 
-		valF =  des->sd * spacing;
-		fwrite(&valF, sizeof(float), 1, file);
+		pointsFile << std::fixed << des->sd * scaleSpacing << ',';
 
-		valC = 1; //point.laplacian;
-		fwrite(&valC, sizeof(char), 1, file);
+		pointsFile << "1,"; //point.laplacian;
 
-		valF =  1.0; //point.response;
-		fwrite(&valF, sizeof(float), 1, file);
+		pointsFile << std::fixed << des->rd; //point.response;
 
 		// write the feature vector
-		for ( unsigned int j = 0; j < DESC_NUM_TOTAL_HIST; j++) {
+		for ( unsigned int j = 0; j < 768 ; j++) {
 
-			const Hist *const hist = des->hists + j;
-
-			int a, p;
-			for ((p) = 0; (p) < NBINS_PO; (p)++) { \
-				for ((a) = 0; (a) < NBINS_AZ; (a)++) {
-					valF = HIST_GET(hist, a, p);
-					fwrite(&valF, sizeof(float), 1, file);
-				}
-			}
+			pointsFile << std::fixed << SIFT3D_MAT_RM_GET( &mat, i, j + 3, float );
+			if ( j <767 ) pointsFile << ",";
 
 		}
 
+		pointsFile << endl;
+
 	}
 
-	fclose(file);
+	pointsFile.close();
 
 }

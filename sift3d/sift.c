@@ -1186,6 +1186,7 @@ static int detect_extrema(SIFT3D *sift3d, Keypoint_store *kp) {
 				key->xd = (double) x;
 				key->yd = (double) y;
 				key->zd = (double) z;
+				key->rd = fabs( pcur );
                         }
 		SIFT3D_IM_LOOP_END
 	SIFT3D_PYR_LOOP_END
@@ -1907,6 +1908,7 @@ static int extract_descrip(SIFT3D *const sift3d, const Image *const im,
 	desc->yd = key->yd * coord_factor;
 	desc->zd = key->zd * coord_factor;
 	desc->sd = key->sd;
+	desc->rd = key->rd;
 
         return SIFT3D_SUCCESS;
 }
