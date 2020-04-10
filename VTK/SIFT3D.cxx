@@ -36,10 +36,11 @@ int main( int argc, char *argv[] )
 
 	if (argc<2)
 	{
-		cout<<"Usage : SIFT3D volume -ct cornerThreshold -pt peakThreshold"<<endl;
+		cout<<"Usage : SIFT3D volume -s spacing -ct cornerThreshold -pt peakThreshold"<<endl;
 		cout<<"options : "<<endl;
 		cout<<"peakThreshold  : values between 0 and 1, default value = 0.1"<<endl;
 		cout<<"cornerThreshold  : values between 0 and 1, default value = 0.5"<<endl;
+		cout<<"spacing  : resample input volume with isotropic spacing"<<endl;
 		exit(1);
 	}
 
