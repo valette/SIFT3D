@@ -33,7 +33,7 @@
  * the calling appropriate functions. */
 const double peak_thresh_default = 0.1; // DoG peak threshold
 const int num_kp_levels_default = 3; // Number of levels per octave in which keypoints are found
-const double corner_thresh_default = 0.5; // Minimum corner score
+const double corner_thresh_default = 0.4; // Minimum corner score
 const double sigma_n_default = 1.15; // Nominal scale of input data
 const double sigma0_default = 1.6; // Scale of the base octave
 
@@ -56,15 +56,6 @@ const double trunc_thresh = 0.2f * 128.0f / DESC_NUMEL; // Descriptor truncation
 
 /* Internal math constants */
 const double gr = 1.6180339887; // Golden ratio
-
-/* Keypoint data format constants */
-const int kp_num_cols = IM_NDIMS * (IM_NDIMS + 1) + 1; // Number of columns
-const int kp_x = 0; // column of x-coordinate
-const int kp_y = 1; // column of y-coordinate
-const int kp_z = 2; // column of z-coordinate
-const int kp_s = 3; // column of s-coordinate
-const int kp_ori = 4; // first column of the orientation matrix
-const int ori_numel = IM_NDIMS * IM_NDIMS; // Number of orientation elements
 
 /* Get the index of bin j from triangle i */
 #define MESH_GET_IDX(mesh, i, j) \
@@ -189,7 +180,7 @@ static int cart2bary(const Cvec * const cart, const Tri * const tri,
 		      Cvec * const bary, float * const k);
 static int scale_Keypoint(const Keypoint *const src, 
         const double *const factors, Keypoint *const dst);
-static int smooth_raw_input(const SIFT3D *const sift3d, const Image *const src,
+static int smooth_scale_raw_input(const SIFT3D *const sift3d, const Image *const src,
         Image *const dst);
 static int verify_keys(const Keypoint_store *const kp, const Image *const im);
 static int keypoint2base(const Keypoint *const src, Keypoint *const dst);
@@ -217,6 +208,8 @@ static void hist2vox(Hist *const hist, const Image *const im, const int x,
         const int y, const int z);
 static int match_desc(const SIFT3D_Descriptor *const desc,
         const SIFT3D_Descriptor_store *const store, const float nn_thresh);
+static int resize_SIFT3D_Descriptor_store(SIFT3D_Descriptor_store *const desc,
+        const int num);
 
 /* Initialize geometry tables. */
 static int init_geometry(SIFT3D *sift3d) {
@@ -474,6 +467,27 @@ void init_SIFT3D_Descriptor_store(SIFT3D_Descriptor_store *const desc) {
  * cannot be used after calling this function, unless re-initialized. */
 void cleanup_SIFT3D_Descriptor_store(SIFT3D_Descriptor_store *const desc) {
         free(desc->buf);
+}
+
+/* Resize a SIFT3D_Descriptor_store to hold n descriptors. Must be initialized
+ * prior to calling this function. num must be positive.
+ *
+ * Returns SIFT3D_SUCCESS on success, SIFT3D_FAILURE otherwise. */
+static int resize_SIFT3D_Descriptor_store(SIFT3D_Descriptor_store *const desc,
+        const int num) {
+
+        if (num < 1) {
+                SIFT3D_ERR("resize_SIFT3D_Descriptor_store: invalid size: %d",
+                        num);
+                return SIFT3D_FAILURE;
+        }
+
+	if ((desc->buf = (SIFT3D_Descriptor *) SIFT3D_safe_realloc(desc->buf, 
+		num * sizeof(SIFT3D_Descriptor))) == NULL)
+                return SIFT3D_FAILURE;
+
+	desc->num = num;
+        return SIFT3D_SUCCESS;
 }
 
 /* Initializes the OpenCL data for this SIFT3D struct. This
@@ -884,6 +898,9 @@ static int set_im_SIFT3D(SIFT3D *const sift3d, const Image *const im) {
         // Make a copy of the input image
         if (im_copy_data(im, &sift3d->im))
                 return SIFT3D_FAILURE;
+
+        // Scale the input image to [-1, 1]
+        im_scale(&sift3d->im);
 
         // Resize the internal data, if necessary
         if ((data_old == NULL || 
@@ -1333,8 +1350,7 @@ static int assign_orientation_thresh(const Image *const im,
  *   -vcenter: The center of the window, in image space.
  *   -sigma: The scale parameter. The width of the window is a constant
  *      multiple of this.
- *   -R: The place to write the rotation matrix. This is 
- *   -R
+ *   -R: The place to write the rotation matrix.
  */
 static int assign_eig_ori(const Image *const im, const Cvec *const vcenter,
                           const double sigma, Mat_rm *const R, 
@@ -1342,7 +1358,7 @@ static int assign_eig_ori(const Image *const im, const Cvec *const vcenter,
 
     Cvec v[2];
     Mat_rm A, L, Q;
-    Cvec vd, vd_win, vdisp, vr;
+    Cvec vd_win, vdisp, vr;
     double d, cos_ang, abs_cos_ang, corner_score;
     float weight, sq_dist, sgn;
     int i, x, y, z, m;
@@ -1379,7 +1395,10 @@ static int assign_eig_ori(const Image *const im, const Cvec *const vcenter,
     vd_win.y = 0.0f;
     vd_win.z = 0.0f;
     IM_LOOP_SPHERE_START(im, x, y, z, vcenter, win_radius, &vdisp, sq_dist)
-	// Compute Gaussian weighting, ignoring constant factor
+
+        Cvec vd;
+
+	// Compute Gaussian weighting, ignoring the constant factor
 	weight = expf(-0.5 * sq_dist / (sigma * sigma));		
 
 	// Get the gradient	
@@ -1396,6 +1415,7 @@ static int assign_eig_ori(const Image *const im, const Cvec *const vcenter,
 	// Update the window gradient
         SIFT3D_CVEC_SCALE(&vd, weight);
 	SIFT3D_CVEC_OP(&vd_win, &vd, +, &vd_win);
+
     IM_LOOP_SPHERE_END
 
     // Fill in the remaining elements
@@ -1436,13 +1456,13 @@ static int assign_eig_ori(const Image *const im, const Cvec *const vcenter,
 	vr.z = (float) SIFT3D_MAT_RM_GET(&Q, 2, eig_idx, double);
 
 	// Get the directional derivative
-	d = SIFT3D_CVEC_DOT(&vd, &vr);
+	d = SIFT3D_CVEC_DOT(&vd_win, &vr);
 
         // Get the cosine of the angle between the eigenvector and the gradient
-        cos_ang = d / (SIFT3D_CVEC_L2_NORM(&vr) * SIFT3D_CVEC_L2_NORM(&vd));
+        cos_ang = d / (SIFT3D_CVEC_L2_NORM(&vr) * SIFT3D_CVEC_L2_NORM(&vd_win));
         abs_cos_ang = fabs(cos_ang);
 
-        // Reject points not meeting the corner score
+        // Compute the corner confidence score
         corner_score = SIFT3D_MIN(corner_score, abs_cos_ang);
 
 	// Get the sign of the derivative
@@ -1533,8 +1553,8 @@ int SIFT3D_assign_orientations(const SIFT3D *const sift3d,
         if ((*conf = SIFT3D_safe_realloc(*conf, num * sizeof(double))) == NULL)
                 goto assign_orientations_quit;
 
-        // Smooth the input
-        if (smooth_raw_input(sift3d, im, &im_smooth))
+        // Smooth and scale the input
+        if (smooth_scale_raw_input(sift3d, im, &im_smooth))
                 goto assign_orientations_quit;
 
         // Assign each orientation
@@ -1566,11 +1586,6 @@ int SIFT3D_assign_orientations(const SIFT3D *const sift3d,
                                 // Set R to identity
                                 if (identity_Mat_rm(IM_NDIMS, R))
                                         goto assign_orientations_quit;
-                                zero_Mat_rm(R);
-                                for (j = 0; j < IM_NDIMS; j++) {
-                                        SIFT3D_MAT_RM_GET(R, j, j, float) =
-                                                1.0;
-                                }
                                 *conf_ret = -1.0;
                                 break;
                         default:
@@ -1830,10 +1845,11 @@ static int extract_descrip(SIFT3D *const sift3d, const Image *const im,
 	// Compute basic parameters 
         const float sigma = key->sd * desc_sig_fctr;
 	const float win_radius = desc_rad_fctr * sigma;
-	const float desc_hw = win_radius / sqrt(2);
-	const float desc_width = 2.0f * desc_hw;
-	const float desc_bin_fctr = (float) NHIST_PER_DIM / desc_width;
-	const double coord_factor = pow(2.0, key->o);
+	const float desc_half_width = win_radius / sqrt(2);
+	const float desc_width = 2.0f * desc_half_width;
+        const float desc_hist_width = desc_width / NHIST_PER_DIM;
+	const float desc_bin_fctr = 1.0f / desc_hist_width;
+	const double coord_factor = ldexp(1.0, key->o);
 
         // Invert the rotation matrix
         if (init_Mat_rm_p(&Rt, buf, IM_NDIMS, IM_NDIMS, SIFT3D_FLOAT, 
@@ -1857,9 +1873,9 @@ static int extract_descrip(SIFT3D *const sift3d, const Image *const im,
 		SIFT3D_MUL_MAT_RM_CVEC(&Rt, &vim, &vkp);		
 
 		// Compute spatial bins
-		vbins.x = (vkp.x + desc_hw) * desc_bin_fctr;
-		vbins.y = (vkp.y + desc_hw) * desc_bin_fctr;
-		vbins.z = (vkp.z + desc_hw) * desc_bin_fctr;
+		vbins.x = (vkp.x + desc_half_width) * desc_bin_fctr;
+		vbins.y = (vkp.y + desc_half_width) * desc_bin_fctr;
+		vbins.z = (vkp.z + desc_half_width) * desc_bin_fctr;
 
 		// Reject points outside the rectangular descriptor 
 		if (vbins.x < 0 || vbins.y < 0 || vbins.z < 0 ||
@@ -1952,8 +1968,8 @@ static int scale_Keypoint(const Keypoint *const src,
         return SIFT3D_SUCCESS;
 }
 
-/* Helper function to smooth a "raw" input image, as if it were processed
- * via SIFT3D_detect_keypoints.
+/* Helper function to smooth and scale a "raw" input image, as if it were 
+ * processed via SIFT3D_detect_keypoints.
  *
  * Parameters:
  *  -sift3d: Stores the parameters sigma_n and sigma0.
@@ -1961,8 +1977,8 @@ static int scale_Keypoint(const Keypoint *const src,
  *  -dst: The output, smoothed image.
  *
  * Return: SIFT3D_SUCCESS on success, SIFT3D_FAILURE otherwise. */
-static int smooth_raw_input(const SIFT3D *const sift3d, const Image *const src,
-        Image *const dst) {
+static int smooth_scale_raw_input(const SIFT3D *const sift3d, 
+        const Image *const src, Image *const dst) {
 
         Gauss_filter gauss;
 
@@ -1976,14 +1992,17 @@ static int smooth_raw_input(const SIFT3D *const sift3d, const Image *const src,
 
         // Smooth the input
         if (apply_Sep_FIR_filter(src, dst, &gauss.f, unit))
-                goto smooth_raw_input_quit;
+                goto smooth_scale_raw_input_quit;
+
+        // Scale the input to [-1, 1]
+        im_scale(dst);
 
         // Clean up
         cleanup_Gauss_filter(&gauss);
         
         return SIFT3D_SUCCESS;
 
-smooth_raw_input_quit:
+smooth_scale_raw_input_quit:
         cleanup_Gauss_filter(&gauss);
         return SIFT3D_FAILURE;
 }
@@ -2048,7 +2067,7 @@ static int verify_keys(const Keypoint_store *const kp, const Image *const im) {
 
                 const Keypoint *key = kp->buf + i;
 
-                const double octave_factor = pow(2.0, key->o);
+                const double octave_factor = ldexp(1.0, key->o);
 
                 if (key->xd < 0 ||
                         key->yd < 0 ||
@@ -2079,7 +2098,7 @@ static int keypoint2base(const Keypoint *const src, Keypoint *const dst) {
         double base_factors[IM_NDIMS];
         int j;
 
-        const double octave_factor = pow(2.0, src->o);
+        const double octave_factor = ldexp(1.0, src->o);
 
         // Convert the factors to the base octave
         for (j = 0; j < IM_NDIMS; j++) {
@@ -2144,7 +2163,7 @@ int SIFT3D_extract_raw_descriptors(SIFT3D *const sift3d,
 
         // Smooth the input image, storing the result in the pyramid
         level = SIFT3D_PYR_IM_GET(&pyr, first_octave, first_level); 
-        if (smooth_raw_input(sift3d, im, level))
+        if (smooth_scale_raw_input(sift3d, im, level))
                 goto extract_raw_descriptors_quit;
 
         // Allocate a temporary copy of the keypoints
@@ -2203,10 +2222,8 @@ static int _SIFT3D_extract_descriptors(SIFT3D *const sift3d,
 	desc->ny = first_level->ny;	
 	desc->nz = first_level->nz;	
 
-	// Resize the descriptor store (num cannot be zero)
-	desc->num = num;
-	if ((desc->buf = (SIFT3D_Descriptor *) SIFT3D_safe_realloc(desc->buf, 
-		num * sizeof(SIFT3D_Descriptor))) == NULL)
+	// Resize the descriptor store
+        if (resize_SIFT3D_Descriptor_store(desc, num))
                 return SIFT3D_FAILURE;
 
         // Extract the descriptors
@@ -2369,8 +2386,8 @@ int SIFT3D_extract_dense_descriptors(SIFT3D *const sift3d,
 
         //TODO: Interpolate to be isotropic
 
-        // Smooth the input image
-        if (smooth_raw_input(sift3d, in, &in_smooth))
+        // Smooth and scale the input image
+        if (smooth_scale_raw_input(sift3d, in, &in_smooth))
                 goto extract_dense_quit;
 
         // Extract the descriptors
@@ -2598,7 +2615,7 @@ int Keypoint_store_to_Mat_rm(const Keypoint_store *const kp, Mat_rm *const mat) 
         const Keypoint *const key = kp->buf + i;
 
         // Adjust the coordinates to the base octave
-        const double coord_factor = pow(2.0, key->o);
+        const double coord_factor = ldexp(1.0, key->o);
 
 	SIFT3D_MAT_RM_GET(mat, i, 0, double) = coord_factor * key->xd;
 	SIFT3D_MAT_RM_GET(mat, i, 1, double) = coord_factor * key->yd;
@@ -2713,16 +2730,19 @@ int Mat_rm_to_SIFT3D_Descriptor_store(const Mat_rm *const mat,
 
 	// Verify inputs
 	if (num_rows < 1 || num_cols != IM_NDIMS + DESC_NUMEL) {
-		printf("Mat_rm_to_SIFT3D_Descriptor_store: invalid matrix "
+		SIFT3D_ERR("Mat_rm_to_SIFT3D_Descriptor_store: invalid matrix "
 		       "dimensions: [%d X %d] \n", num_rows, num_cols);
 		return SIFT3D_FAILURE;
 	}
-
-	// Resize the descriptor store (num cannot be zero)
-	store->num = num_rows;
-	if ((store->buf = (SIFT3D_Descriptor *) SIFT3D_safe_realloc(store->buf, 
-		num_rows * sizeof(SIFT3D_Descriptor))) == NULL)
+        if (mat->type != SIFT3D_FLOAT) {
+		SIFT3D_ERR("Mat_rm_to_SIFT3D_Descriptor_store: matrix must "
+                        "have type SIFT3D_FLOAT");
 		return SIFT3D_FAILURE;
+        }
+
+        /* Resize the descriptor store */
+        if (resize_SIFT3D_Descriptor_store(store, num_rows))
+                return SIFT3D_FAILURE;
 
 	// Copy the data
 	for (i = 0; i < num_rows; i++) {
@@ -2733,6 +2753,7 @@ int Mat_rm_to_SIFT3D_Descriptor_store(const Mat_rm *const mat,
 		desc->xd = SIFT3D_MAT_RM_GET(mat, i, 0, float);
 		desc->yd = SIFT3D_MAT_RM_GET(mat, i, 1, float);
 		desc->zd = SIFT3D_MAT_RM_GET(mat, i, 2, float);
+                desc->sd = sigma0_default;
 
 		// Copy the feature vector
 		for (j = 0; j < DESC_NUM_TOTAL_HIST; j++) {
@@ -3112,11 +3133,13 @@ draw_matches_quit:
  * (.csv, .csv.gz), where each keypoint is a row. The elements of each row are
  * as follows:
  *
- * x y z s ori11 ori12 ... or1nn
+ * x y z o s ori11 ori12 ... orinn
  *
  * x - the x-coordinate
  * y - the y-coordinate
  * z - the z-coordinate
+ * o - the pyramid octave. To convert to image coordinates, multiply x,y,z by 
+ *      pow(2, o)
  * s - the scale coordinate
  * ori(ij) - the ith row, jth column of the orientation matrix */
 int write_Keypoint_store(const char *path, const Keypoint_store *const kp) {
@@ -3124,10 +3147,20 @@ int write_Keypoint_store(const char *path, const Keypoint_store *const kp) {
         Mat_rm mat;
 	int i, i_R, j_R;
 
+        // Keypoint data format constants
+        const int kp_x = 0; // column of x-coordinate
+        const int kp_y = 1; // column of y-coordinate
+        const int kp_z = 2; // column of z-coordinate
+        const int kp_o = 3; // column of octave index
+        const int kp_s = 4; // column of s-coordinate
+        const int kp_ori = 5; // first column of the orientation matrix
+        const int ori_numel = IM_NDIMS * IM_NDIMS; // Number of orientation 
+                // elements
         const int num_rows = kp->slab.num;
+        const int num_cols = kp_ori + ori_numel;
 
         // Initialize the matrix
-        if (init_Mat_rm(&mat, num_rows, kp_num_cols, SIFT3D_DOUBLE, 
+        if (init_Mat_rm(&mat, num_rows, num_cols, SIFT3D_DOUBLE, 
 		SIFT3D_FALSE))
                 return SIFT3D_FAILURE;
        
@@ -3139,8 +3172,9 @@ int write_Keypoint_store(const char *path, const Keypoint_store *const kp) {
 
                 // Write the coordinates 
                 SIFT3D_MAT_RM_GET(&mat, i, kp_x, double) = key->xd;
-                SIFT3D_MAT_RM_GET(&mat, i, kp_y, double) = key->yd;
-                SIFT3D_MAT_RM_GET(&mat, i, kp_z, double) = key->zd;
+                SIFT3D_MAT_RM_GET(&mat, i, kp_y, double) = key->yd; 
+                SIFT3D_MAT_RM_GET(&mat, i, kp_z, double) = key->zd; 
+                SIFT3D_MAT_RM_GET(&mat, i, kp_o, double) = key->o; 
                 SIFT3D_MAT_RM_GET(&mat, i, kp_s, double) = key->sd;
 
                 // Write the orientation matrix

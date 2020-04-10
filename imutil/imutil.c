@@ -1,7 +1,7 @@
 /* -----------------------------------------------------------------------------
  * imutil.c
  * -----------------------------------------------------------------------------
- * Copyright (c) 2015-2016 Blaine Rister et al., see LICENSE for details.
+ * Copyright (c) 2015-2017 Blaine Rister et al., see LICENSE for details.
  * -----------------------------------------------------------------------------
  * Miscellaneous utility routines for image processing, linear algebra, and 
  * statistical regression. This library completely defines the Image,
@@ -17,14 +17,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <stddef.h>
 #include <float.h>
 #include <zlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <nifti1_io.h>
 #include "immacros.h"
 #include "imtypes.h"
 #include "dicom.h"
+#include "nifti.h"
 #include "imutil.h"
 
 /* Check for a version number */
@@ -50,6 +52,26 @@
 /* Implementation parameters */
 //#define SIFT3D_USE_OPENCL // Use OpenCL acceleration
 #define SIFT3D_RANSAC_REFINE	// Use least-squares refinement in RANSAC
+
+/* Implement strnlen, if it's missing */
+#ifndef SIFT3D_HAVE_STRNLEN
+size_t strnlen(const char *string, size_t maxlen) {
+  const char *end = memchr (string, '\0', maxlen);
+  return end ? end - string : maxlen;
+}
+#endif
+
+/* Implement strndup, if it's missing */
+#ifndef SIFT3D_HAVE_STRNDUP
+char *strndup(const char *s, size_t n) {
+  size_t len = strnlen (s, n);
+  char *new = malloc (len + 1);
+  if (new == NULL)
+    return NULL;
+  new[len] = '\0';
+  return memcpy (new, s, len);
+}
+#endif
 
 /* SIFT3D version message */
 const char version_msg[] =
@@ -129,16 +151,10 @@ const Tform_vtable Tps_vtable = {
 /* Global data */
 CL_data cl_data;
 
-/* Internal types */
-typedef struct _List {
-	struct _List *next;
-	struct _List *prev;
-	int idx;
-} List;
-
 /* LAPACK declarations */
 #ifdef SIFT3D_MEX
 // Set the integer width to Matlab's defined width
+#include <uchar.h>
 #include "mex.h"
 typedef mwSignedIndex fortran_int;
 #ifdef _WINDOWS
@@ -194,12 +210,7 @@ static int compile_cl_program_from_source(cl_program * program,
 					  cl_device_id * devices,
 					  int num_devices, char **src,
 					  int num_str);
-static int init_List(List ** list, const int num);
-static int List_get(List * list, const int idx, List ** el);
-static void List_remove(List ** list, List * el);
-static void cleanup_List(List * list);
-static int rand_rows(const Mat_rm *const in1, const Mat_rm *const in2, 
-        const int num_rows, Mat_rm *const out1, Mat_rm *const out2);
+static int n_choose_k(const int n, const int k, int **ret);
 static int make_spline_matrix(Mat_rm * src, Mat_rm * src_in, Mat_rm * sp_src,
 			      int K_terms, int *r, int dim);
 static int make_affine_matrix(const Mat_rm *const pts_in, const int dim, 
@@ -226,8 +237,6 @@ static int convolve_sep_sym(const Image * const src, Image * const dst,
                             const double unit);
 static const char *get_file_name(const char *path);
 static const char *get_file_ext(const char *name);
-static int read_nii(const char *path, Image *const im);
-static int write_nii(const char *path, const Image *const im);
 
 /* Unfinished public routines */
 int init_Tps(Tps * tps, int dim, int terms);
@@ -924,7 +933,7 @@ int zero_Mat_rm(Mat_rm *const mat)
  */
 int identity_Mat_rm(const int n, Mat_rm *const mat) {
 
-        int i, j;
+        int i;
 
         // Resize the matrix 
         mat->num_rows = mat->num_cols = n;
@@ -935,9 +944,9 @@ int identity_Mat_rm(const int n, Mat_rm *const mat) {
         zero_Mat_rm(mat);
 
 #define SET_IDENTITY(type) \
-        SIFT3D_MAT_RM_LOOP_START(mat, i, j) \
-                SIFT3D_MAT_RM_GET(mat, i, j, type) = (type) 1; \
-        SIFT3D_MAT_RM_LOOP_END
+        for (i = 0; i < n; i++) { \
+                SIFT3D_MAT_RM_GET(mat, i, i, type) = (type) 1; \
+        }
 
         SIFT3D_MAT_RM_TYPE_MACRO(mat, identity_Mat_rm_quit, SET_IDENTITY);
 #undef SET_IDENTITY
@@ -1196,6 +1205,11 @@ im_format im_get_format(const char *path) {
  * -SIFT3D_SUCCESS - Image successfully read
  * -SIFT3D_FILE_DOES_NOT_EXIST - The file does not exist
  * -SIFT3D_UNSUPPORTED_FILE_TYPE - The file type is not supported
+ * -SIFT3D_WRAPPER_NOT_COMPILED - The file type is supported, but the wrapper 
+ *      library was not compiled.
+ * -SIFT3D_UNEVEN_SPACING - The image slices are unevenly spaced.
+ * -SIFT3D_INCONSISTENT_AXES  - The image slices have inconsistent axes.
+ * -SIFT3D_DUPLICATE_SLICES - There are multiple slices in the same location.
  * -SIFT3D_FAILURE - Other error
  */
 int im_read(const char *path, Image *const im) {
@@ -1231,128 +1245,7 @@ int im_read(const char *path, Image *const im) {
                 ret = SIFT3D_UNSUPPORTED_FILE_TYPE;
         }
 
-        // Return errors, if any
-        if (ret) return ret;
-
-	// Scale the image to [-1, 1]
-	im_scale(im);
-
-        return SIFT3D_SUCCESS;
-}
-
-/* Helper function to load a file into the specific Image object.
- * Prior to calling this function, use init_im(im).
- * This function allocates memory.
- * 
- * Note: For performance, you can use this to resize
- * an existing image.
- *
- * Supported formats:
- * - NIFTI */
-static int read_nii(const char *path, Image *const im)
-{
-
-	nifti_image *nifti;
-	int x, y, z, i, dim_counter;
-
-	// Read NIFTI file
-	if ((nifti = nifti_image_read(path, 1)) == NULL) {
-		SIFT3D_ERR("read_nii: failure loading file %s", path);
-                return SIFT3D_FAILURE;
-	}
-
-	// Find the dimensionality of the array, given by the last dimension
-	// greater than 1. Note that the dimensions begin at dim[1].
-	for (dim_counter = nifti->ndim; dim_counter > 0; dim_counter--) {
-		if (nifti->dim[dim_counter] > 1) {
-			break;
-		}
-	}
-
-        // Check the dimensionality
-	if (dim_counter > 3) {
-		SIFT3D_ERR("read_nii: file %s has unsupported "
-			"dimensionality %d\n", path, dim_counter);
-		goto read_nii_quit;
-	}
-
-        // Fill the trailing dimensions with 1
-        for (i = dim_counter; i < IM_NDIMS; i++) {
-                SIFT3D_IM_GET_DIMS(im)[i] = 1;
-        }
-
-	// Store the real world coordinates
-	im->ux = nifti->dx;
-	im->uy = nifti->dy;
-	im->uz = nifti->dz;
-
-	// Resize im    
-	im->nx = nifti->nx;
-	im->ny = nifti->ny;
-	im->nz = nifti->nz;
-	im->nc = 1;
-	im_default_stride(im);
-	im_resize(im);
-
-#define IM_COPY_FROM_TYPE(type) \
-    SIFT3D_IM_LOOP_START(im, x, y, z)   \
-        SIFT3D_IM_GET_VOX(im, x, y, z, 0) = (float) ((type *)nifti->data)[ \
-        SIFT3D_IM_GET_IDX(im, x, y, z, 0)]; \
-    SIFT3D_IM_LOOP_END
-
-	// Copy the data into im
-	switch (nifti->datatype) {
-	case NIFTI_TYPE_UINT8:
-		IM_COPY_FROM_TYPE(uint8_t);
-		break;
-	case NIFTI_TYPE_INT8:
-		IM_COPY_FROM_TYPE(int8_t);
-		break;
-	case NIFTI_TYPE_UINT16:
-		IM_COPY_FROM_TYPE(uint16_t);
-		break;
-	case NIFTI_TYPE_INT16:
-		IM_COPY_FROM_TYPE(int16_t);
-		break;
-	case NIFTI_TYPE_UINT32:
-		IM_COPY_FROM_TYPE(uint32_t);
-		break;
-	case NIFTI_TYPE_INT32:
-		IM_COPY_FROM_TYPE(int32_t);
-		break;
-	case NIFTI_TYPE_UINT64:
-		IM_COPY_FROM_TYPE(uint64_t);
-		break;
-	case NIFTI_TYPE_INT64:
-		IM_COPY_FROM_TYPE(int64_t);
-		break;
-	case NIFTI_TYPE_FLOAT32:
-		IM_COPY_FROM_TYPE(float);
-		break;
-	case NIFTI_TYPE_FLOAT64:
-		IM_COPY_FROM_TYPE(double);
-		break;
-	case NIFTI_TYPE_FLOAT128:
-	case NIFTI_TYPE_COMPLEX128:
-	case NIFTI_TYPE_COMPLEX256:
-	case NIFTI_TYPE_COMPLEX64:
-	default:
-		SIFT3D_ERR("read_nii: unsupported datatype %s \n",
-			nifti_datatype_string(nifti->datatype));
-                goto read_nii_quit;
-	}
-#undef IM_COPY_FROM_TYPE
-
-	// Clean up NIFTI data
-	nifti_free_extensions(nifti);
-	nifti_image_free(nifti);
-
-	return SIFT3D_SUCCESS;
-
-read_nii_quit:
-        nifti_free_extensions(nifti);
-        nifti_image_free(nifti);
-	return SIFT3D_FAILURE;
+        return ret;
 }
 
 /* Write an image to a file.
@@ -1403,61 +1296,6 @@ int im_write(const char *path, const Image *const im) {
         return SIFT3D_FAILURE;
 }
 
-/* Helper function to write an Image to the specified path.
- * Supported formats:
- * -NIFTI (.nii, .nii.gz) */
-static int write_nii(const char *path, const Image *const im)
-{
-
-	nifti_image *nifti;
-	size_t i;
-
-	const int dims[] = { 3, im->nx, im->ny, im->nz, 0, 0, 0, 0 };
-
-	// Verify inputs
-	if (im->nc != 1) {
-		SIFT3D_ERR("write_nii: unsupported number of "
-			"channels: %d. This function only supports single-"
-			"channel images.", im->nc);
-		return SIFT3D_FAILURE;
-	}
-
-	// Init a nifti struct and allocate memory
-	if ((nifti = nifti_make_new_nim(dims, DT_FLOAT32, 1))
-	    == NULL)
-		goto write_nii_quit;
-
-        // Copy the units
-        nifti->dx = im->ux;
-        nifti->dy = im->uy;
-        nifti->dz = im->uz;
-
-	// Copy the data
-	for (i = 0; i < im->size; i++) {
-		((float *)nifti->data)[i] = im->data[i];
-	}
-
-	if (nifti_set_filenames(nifti, path, 0, 1))
-		goto write_nii_quit;
-
-	// Sanity check
-	if (!nifti_nim_is_valid(nifti, 1))
-		goto write_nii_quit;
-
-	nifti_image_write(nifti);
-	nifti_free_extensions(nifti);
-	nifti_image_free(nifti);
-
-	return SIFT3D_SUCCESS;
-
- write_nii_quit:
-	if (nifti != NULL) {
-		nifti_free_extensions(nifti);
-		nifti_image_free(nifti);
-	}
-	return SIFT3D_FAILURE;
-}
-
 /* Separate the file name component from its path */
 static const char *get_file_name(const char *path) {
 
@@ -1481,6 +1319,24 @@ static const char *get_file_ext(const char *name)
 	dot = strrchr(name, '.');
 
 	return dot == NULL || dot == name ? "" : dot + 1;
+}
+
+/* Get the parent directory of a file. The returned string must later be
+ * freed. */
+char *im_get_parent_dir(const char *path) {
+
+        ptrdiff_t file_pos;
+        char *dirName;
+
+        // Duplicate the path so we can edit it
+        dirName = strndup(path, FILENAME_MAX); 
+
+        // Subtract away the file name
+        file_pos = get_file_name(path) - path;
+        if (file_pos > 0)
+                dirName[file_pos] = '\0';
+       
+        return dirName; 
 }
 
 /* Write a matrix to a .csv or .csv.gz file. */
@@ -4291,7 +4147,7 @@ static int mkpath(const char *path, mode_t mode)
 	char *pp, *sp, *copypath;
 	int status;
 
-	if ((copypath = strdup(path)) == NULL)
+	if ((copypath = strndup(path, FILENAME_MAX)) == NULL)
 		status = -1;
 
 	/* Ignore everything after the last '/' */
@@ -4420,174 +4276,53 @@ int copy_Ransac(const Ransac *const src, Ransac *const dst) {
                 set_err_thresh_Ransac(dst, src->err_thresh);
 }
 
-/* Select a random subset of rows, length "num_rows".
- * This function resizes out. 
- * 
- * Returns an error if in->num_rows < num_rows.
- * Both input matrices must have type double and the same dimensions.
+/* Returns an array of k integers, (uniformly) randomly chosen from the 
+ * integers 0 through n - 1.
  *
- * All matrices must be initialized prior to calling 
- * this function.*/
-static int rand_rows(const Mat_rm *const in1, const Mat_rm *const in2, 
-        const int num_rows, Mat_rm *const out1, Mat_rm *const out2)
-{
+ * The value of *ret must either be NULL, or a pointer to a previously
+ * allocated block. On successful return, *ret contains the k random integers.
+ *
+ * Returns SIFT3D_SUCCESS on succes, SIFT3D_FAILURE otherwise. */
+static int n_choose_k(const int n, const int k, int **ret) {
 
-	List *row_indices, *el;
-	int i, j, list_size, idx;
+        int i;
 
-	const int num_rows_in = in1->num_rows;
-	const int num_cols = in1->num_cols;
-	const int num_remove = in1->num_rows - num_rows;
+        // Verify inputs
+        if (n < k || k < 1)
+                goto n_choose_k_fail;
 
-	// Verify inputs
-	if (in2->num_rows != num_rows_in || in2->num_cols != num_cols) {
-		puts("rand_rows; inputs must have the same dimension \n");
-		return SIFT3D_FAILURE;
-	}
-	if (in1->num_rows > RAND_MAX) {
-		puts("rand_rows: input matrix is too large \n");
-		return SIFT3D_FAILURE;
-	}
-	if (num_remove < 0) {
-		puts("rand_rows: not enough rows in the matrix \n");
-		return SIFT3D_FAILURE;
-	}
-	if (in1->type != SIFT3D_DOUBLE || in2->type != SIFT3D_DOUBLE) {
-		puts("rand_rows: inputs must have type int \n");
-		return SIFT3D_FAILURE;
-	}
-	// Resize the outputs
-	out1->type = out2->type = in1->type;
-	out1->num_rows = out2->num_rows = num_rows;
-	out1->num_cols = out2->num_cols = num_cols;
-	if (resize_Mat_rm(out1) || resize_Mat_rm(out2))
-		return SIFT3D_FAILURE;
+        // Allocate the array of n elements
+        if ((*ret = malloc(n * sizeof(int))) == NULL)
+                goto n_choose_k_fail;
 
-	// Initialize a list with all of the row indices
-	if (init_List(&row_indices, num_rows_in))
-		return SIFT3D_FAILURE;
+        // Initialize the array of indices
+        for (i = 0; i < n; i++) {
+                (*ret)[i] = i;
+        }
 
-	for (i = 0; i < num_rows_in; i++) {
-		if (List_get(row_indices, i, &el))
-			return SIFT3D_FAILURE;
-		el->idx = i;
-	}
+        // Randomize the first k indices using Knuth shuffles
+        for (i = 0; i < k; i++) {
 
-	// Remove random rows
-	list_size = num_rows_in;
-	for (i = 0; i < num_remove; i++) {
-		// Draw a random number
-		idx = rand() % list_size;
+                int *const ints = *ret;
+                const int temp = ints[i]; 
+                const int rand_idx = i + rand() % (n - i);
 
-		// Remove that element
-		if (List_get(row_indices, idx, &el))
-			return SIFT3D_FAILURE;
-		List_remove(&row_indices, el);
-		list_size--;
-	}
+                ints[i] = ints[rand_idx];
+                ints[rand_idx] = temp;
+        }
 
-	// Build the output matrices
-	el = row_indices;
-	SIFT3D_MAT_RM_LOOP_START(out1, i, j)
-	                SIFT3D_MAT_RM_GET(out1, i, j, double) =
-	                        SIFT3D_MAT_RM_GET(in1, el->idx, j, double);
-	                SIFT3D_MAT_RM_GET(out2, i, j, double) =
-	                        SIFT3D_MAT_RM_GET(in2, el->idx, j, double);
-	        SIFT3D_MAT_RM_LOOP_COL_END
-	        // Get the next row
-	        el = el->next;
-	SIFT3D_MAT_RM_LOOP_ROW_END
+        // Release unused memory
+        if ((*ret = SIFT3D_safe_realloc(*ret, k * sizeof(int))) == NULL)
+                goto n_choose_k_fail;
 
-	// Clean up
-        cleanup_List(row_indices);
+        return SIFT3D_SUCCESS;
 
-	return SIFT3D_SUCCESS;
-}
-
-/* Initialize a list of num elements. */
-static int init_List(List ** list, const int num)
-{
-
-	List *prev, *cur;
-	int i;
-
-	prev = NULL;
-	for (i = 0; i < num; i++) {
-		if ((cur = (List *) malloc(sizeof(List))) == NULL)
-			return SIFT3D_FAILURE;
-
-		if (i == 0)
-			*list = cur;
-
-		cur->next = NULL;
-		cur->prev = prev;
-
-		if (prev != NULL)
-			prev->next = cur;
-
-		prev = cur;
-	}
-
-	return SIFT3D_SUCCESS;
-}
-
-/* Get the element idx in list. Returns a pointer to the element in el.
- * Returns SIFT3D_FAILURE if NULL is reached before idx elements have been 
- * traversed. */
-static int List_get(List * list, const int idx, List ** el)
-{
-
-	int i;
-
-	// Verify inputs
-	if (idx < 0)
-		return SIFT3D_FAILURE;
-
-	// Traverse the list 
-	for (i = 0; i < idx; i++) {
-		list = list->next;
-
-		if (list == NULL)
-			return SIFT3D_FAILURE;
-	}
-
-	*el = list;
-	return SIFT3D_SUCCESS;
-}
-
-/* Remove an element from its list, freeing its memory. */
-static void List_remove(List ** list, List * el)
-{
-	if (list == NULL || el == NULL)
-		return;
-
-	if (el->next != NULL)
-		el->next->prev = el->prev;
-
-	if (el->prev != NULL)
-		el->prev->next = el->next;
-
-	if (*list == el)
-		*list = el->next;
-
-	free(el);
-}
-
-/* Free all of the memory for a list. */
-static void cleanup_List(List * list)
-{
-
-	while (1) {
-		List_remove(&list, list->prev);
-
-		if (list->next == NULL) {
-			List_remove(&list, list);
-			break;
-		}
-
-		list = list->next;
-	}
-
+n_choose_k_fail:
+        if (*ret != NULL) {
+                free(*ret);
+                *ret = NULL;
+        }
+        return SIFT3D_FAILURE;
 }
 
 //make the system matrix for spline
@@ -4884,13 +4619,14 @@ static double tform_err_sq(const void *const tform, const Mat_rm *const src,
 static int ransac(const Mat_rm *const src, const Mat_rm *const ref, 
         const Ransac *const ran, void *tform, int **const cset, int *const len)
 {
-	/* Initialization */
+        int *rand_indices;
 	Mat_rm src_rand, ref_rand;
-	int i, sel_pts, cset_len;
+	int i, j, num_rand, cset_len;
 
 	const double err_thresh = ran->err_thresh;
 	const double err_thresh_sq = err_thresh * err_thresh;
-	const int num_src = src->num_rows;
+	const int num_pts = src->num_rows;
+        const int num_dim = src->num_cols;
 	const tform_type type = tform_get_type(tform);
 
 	// Verify inputs
@@ -4902,26 +4638,39 @@ static int ransac(const Mat_rm *const src, const Mat_rm *const ref,
 		puts("ransac: src and ref must have the same dimensions \n");
 		return SIFT3D_FAILURE;
 	}
-	// Initialize
-	init_Mat_rm(&src_rand, 0, 0, SIFT3D_DOUBLE, SIFT3D_FALSE);
-	init_Mat_rm(&ref_rand, 0, 0, SIFT3D_DOUBLE, SIFT3D_FALSE);
 
-	/*Fit random points */
-	//number of points it randomly chooses
+        // Get the number of points for this transform
 	switch (type) {
 	case AFFINE:
-		sel_pts = AFFINE_GET_DIM((Affine *const) tform) + 1;
+		num_rand = AFFINE_GET_DIM((Affine *const) tform) + 1;
 		break;
 	default:
 		printf("ransac: unknown transformation type \n");
-		goto RANSAC_FAIL;
+                return SIFT3D_FAILURE;
 	}
 
-	//choose random points
-	if (rand_rows(src, ref, sel_pts, &src_rand, &ref_rand))
-		goto RANSAC_FAIL;
+	// Initialize intermediates
+        rand_indices = NULL;
+	init_Mat_rm(&src_rand, num_rand, num_dim, SIFT3D_DOUBLE, SIFT3D_FALSE);
+	init_Mat_rm(&ref_rand, num_rand, num_dim, SIFT3D_DOUBLE, SIFT3D_FALSE);
 
-	//solve the system
+        // Draw random point indices
+        if (n_choose_k(num_pts, num_rand, &rand_indices))
+                goto RANSAC_FAIL;
+
+        // Copy the random points
+	SIFT3D_MAT_RM_LOOP_START(&src_rand, i, j)
+
+                const int rand_idx = rand_indices[i];
+
+                SIFT3D_MAT_RM_GET(&src_rand, i, j, double) =
+                        SIFT3D_MAT_RM_GET(src, rand_idx, j, double);
+                SIFT3D_MAT_RM_GET(&ref_rand, i, j, double) =
+                        SIFT3D_MAT_RM_GET(ref, rand_idx, j, double);
+
+        SIFT3D_MAT_RM_LOOP_END
+
+        // Fit a transform to the random points
 	switch (solve_system(&src_rand, &ref_rand, tform)) {
 	case SIFT3D_SUCCESS:
 		break;
@@ -4931,11 +4680,9 @@ static int ransac(const Mat_rm *const src, const Mat_rm *const ref,
 		goto RANSAC_FAIL;
 	}
 
-	/*Extract consensus set */
-	//Pointwise transformation to find consensus set
-	//test for each source point
+	// Extract the consensus set
 	cset_len = 0;
-	for (i = 0; i < num_src; i++) {
+	for (i = 0; i < num_pts; i++) {
 
 		// Calculate the error
 		const double err_sq = tform_err_sq(tform, src, ref, i);
@@ -4955,16 +4702,22 @@ static int ransac(const Mat_rm *const src, const Mat_rm *const ref,
 	// Return the new length of cset
 	*len = cset_len;
 
+        if (rand_indices != NULL)
+                free(rand_indices);
 	cleanup_Mat_rm(&src_rand);
 	cleanup_Mat_rm(&ref_rand);
 	return SIFT3D_SUCCESS;
 
- RANSAC_SINGULAR:
+RANSAC_SINGULAR:
+        if (rand_indices != NULL)
+                free(rand_indices);
 	cleanup_Mat_rm(&src_rand);
 	cleanup_Mat_rm(&ref_rand);
 	return SIFT3D_SINGULAR;
 
- RANSAC_FAIL:
+RANSAC_FAIL:
+        if (rand_indices != NULL)
+                free(rand_indices);
 	cleanup_Mat_rm(&src_rand);
 	cleanup_Mat_rm(&ref_rand);
 	return SIFT3D_FAILURE;
@@ -5083,6 +4836,7 @@ int find_tform_ransac(const Ransac *const ran, const Mat_rm *const src,
 	                SIFT3D_MAT_RM_GET(ref, idx, j, double);
 
 	SIFT3D_MAT_RM_LOOP_END
+
 #ifdef SIFT3D_RANSAC_REFINE
 	// Refine with least squares
 	switch (solve_system(&src_cset, &ref_cset, tform_cur)) {

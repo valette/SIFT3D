@@ -20,6 +20,7 @@
 #include "mexutil.h"
 
 /* Matlab headers */
+#include <uchar.h>
 #include "mex.h"
 #include "matrix.h"
 
@@ -161,7 +162,7 @@ int mx2im(const mxArray *const mx, Image *const im) {
         } 
 
         // Copy the number of channels, defaulting to 1
-        im->nc = mxNDims == MX_IM_NDIMS ? (int) mxDims[MX_IM_NDIMS] : 1;
+        im->nc = mxNDims == MX_IM_NDIMS ? (int) mxDims[MX_IM_NDIMS - 1] : 1;
 
         // Resize the output                
         im_default_stride(im);
@@ -329,8 +330,15 @@ int mx2mat(const mxArray *const mx, Mat_rm *const mat) {
         int i, j;
 
         // Verify inputs
-        if (!isDouble(mx) || mxGetNumberOfDimensions(mx) != 2)
+        if (!isDouble(mx)) {
+                SIFT3D_ERR("mx2mat: mx must have type double");
                 return SIFT3D_FAILURE;
+        }
+
+        if (mxGetNumberOfDimensions(mx) != 2) {
+                SIFT3D_ERR("mx2mat: mx must be a matrix");
+                return SIFT3D_FAILURE;
+        }
 
         // Resize the output
         mxDims = mxGetDimensions(mx);
@@ -595,6 +603,37 @@ desc2mx_quit:
         cleanup_Mat_rm(&mat);
         return NULL;
 } 
+
+/* Converts a pair of mxArrays to a SIFT3D_Descriptor_store. */
+int mx2desc(const mxArray *const mx, SIFT3D_Descriptor_store *const desc) {
+
+        Mat_rm mat;
+
+        // Initialize intermediates
+        if (init_Mat_rm(&mat, 0, 0, SIFT3D_FLOAT, SIFT3D_FALSE))
+                return SIFT3D_FAILURE;
+
+        // Convert the mxArrays to a matrix
+        if (mx2mat(mx, &mat)) {
+                SIFT3D_ERR("mx2desc: Failed to convert mx to mat");
+                goto mx2desc_quit;
+        }
+
+        // Convert the matrix to a SIFT3D_Descriptor_store
+        if (Mat_rm_to_SIFT3D_Descriptor_store(&mat, desc)) {
+                SIFT3D_ERR("mx2desc: Failed to convert mat to desc");
+                goto mx2desc_quit;
+        }
+
+        // Clean up
+        cleanup_Mat_rm(&mat);
+
+        return SIFT3D_SUCCESS;
+
+mx2desc_quit:
+        cleanup_Mat_rm(&mat);
+        return SIFT3D_FAILURE;
+}
 
 /* Convert an array of doubles to an mxArray. 
  *

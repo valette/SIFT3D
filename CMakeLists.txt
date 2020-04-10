@@ -1,5 +1,5 @@
 ################################################################################
-# Copyright (c) 2015-2015 Blaine Rister et al., see LICENSE for details.
+# Copyright (c) 2015-2017 Blaine Rister et al., see LICENSE for details.
 ################################################################################
 # Top-level build file for SIFT3D.
 ################################################################################
@@ -7,7 +7,11 @@
 include (ExternalProject)
 
 # Minimum CMake version
-cmake_minimum_required (VERSION 2.8)
+cmake_minimum_required (VERSION 3.3)
+
+# Minimum C++ version
+set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Convert GNU archives to .lib files in Windows
 if (WIN32)
@@ -21,7 +25,7 @@ endif ()
 project (SIFT3D)
 
 # Project version
-set (SIFT3D_VERSION 1.4.3)
+set (SIFT3D_VERSION 1.4.6)
 
 # Default build type
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -37,13 +41,11 @@ else ()
         set (_BUILD_CLI ON)
 endif()
 
-# Optional component vairables
+# Optional component variables
 set (BUILD_CLI ${_BUILD_CLI} CACHE BOOL 
         "If ON, builds the command line interface")
 set (BUILD_EXAMPLES "ON" CACHE BOOL "If ON, builds the example programs")
-set (BUILD_Matlab "ON" CACHE BOOL "If ON, builds the Matlab toolbox")
 set (BUILD_PACKAGE "OFF" CACHE BOOL "If ON, builds the package generator")
-set (WITH_OpenMP "ON" CACHE BOOL "If ON, parallelizes with OpenMP in release mode")
 
 # Configurable paths        
 set (INSTALL_LIB_DIR "lib/sift3d" CACHE PATH 
@@ -116,39 +118,50 @@ else ()
 endif ()
 find_package (ZLIB REQUIRED)
 
-# Optionally find and use OpenMP
+# Try to find and use OpenMP
+find_package (OpenMP)
+if (OPENMP_FOUND)
+        # Nothing extra needs to be done here.
+elseif (WITH_OpenMP)
+        message (FATAL_ERROR "OpenMP not found. Please provide a compiler that "
+                "supports OpenMP, or disable the OpenMP by setting "
+                "the variable WITH_OpenMP to false.")
+else ()
+        message (STATUS "Failed to find OpenMP. Compiling without it.")
+endif ()
+set (WITH_OpenMP ${OPENMP_FOUND} CACHE BOOL "If ON, parallelizes with OpenMP "
+        "in release mode")
 if (WITH_OpenMP)
-        find_package (OpenMP)
+        set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${OpenMP_C_FLAGS}")
+        set (CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${OpenMP_CXX_FLAGS}")
+endif ()
 
-        if (OPENMP_FOUND)
-                set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${OpenMP_C_FLAGS}")
-                set (CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${OpenMP_CXX_FLAGS}")
-        else ()
-                message (STATUS "Failed to find OpenMP. Compiling without it.")
+# Look for MATLAB in the default locations
+find_package (Matlab QUIET)
+
+# If not found, look for MATLAB in OS-specific locations
+if (NOT Matlab_FOUND)
+        if (APPLE)
+                set (Matlab_ROOT_DIR 
+                        "/Applications/Matlab.app")
+                find_package (Matlab QUIET)
         endif ()
 endif ()
 
-# Optionally find Matlab
-if (BUILD_Matlab)
-	# Look for MATLAB in the default locations
-	find_package (Matlab QUIET)
-
-	# If not found, look for MATLAB in OS-specific locations
-	if (NOT ${Matlab_FOUND})
-		if (APPLE)
-			set (Matlab_ROOT_DIR 
-				"/Applications/Matlab.app")
-			find_package (Matlab QUIET)
-		endif ()
-	endif ()
-else ()
-	# Disable Matlab
-	set (Matlab_FOUND FALSE)
-endif ()
-
 # Set up Matlab paths
-if (${Matlab_FOUND})
-        message (STATUS "Found Matlab. Building the Matlab toolbox.")
+if (Matlab_FOUND)
+	message (STATUS "Found Matlab.")
+elseif (BUILD_Matlab)
+        message (FATAL_ERROR "Matlab not found. Please set the variable "
+                "Matlab_ROOT_DIR to the location of your Matlab installation, "
+                "or disable the Matlab toolbox by setting BUILD_Matlab to "
+                "false.")
+else ()
+        message (STATUS "Matlab not found. The toolbox will not be built.")
+endif ()
+set (BUILD_Matlab ${Matlab_FOUND} CACHE BOOL "If ON, builds the Matlab toolbox")
+if (BUILD_Matlab)
+        message (STATUS "Building the Matlab toolbox.")
 
         # Set the name and location of the Matlab toolbox
         set (TOOLBOX_NAME "matlab")
@@ -178,8 +191,6 @@ if (${Matlab_FOUND})
         find_library (Matlab_MWBLAS_LIBRARY mwblas libmwblas 
                 PATHS ${Matlab_LIBRARIES_PATH}
         )
-else ()
-        message (STATUS "Matlab not found. The toolbox will not be built.")
 endif ()
 
 # Generate the package configuration files

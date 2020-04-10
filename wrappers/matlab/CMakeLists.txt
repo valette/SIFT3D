@@ -4,10 +4,14 @@
 # Build file for the Matlab wrapper toolbox.
 ################################################################################
 
+# There is an issue with MEX compilation for Matlab 2018b that requires a newer 
+# CMake.
+cmake_minimum_required (VERSION 3.15)
+
 # Enumerate the Matlab scripts for testing and installation
 set (INSTALL_SCRIPTS setupSift3D.m imRead3D.m imWrite3D.m detectSift3D.m
         extractSift3D.m orientation3D.m keypoint3D.m registerSift3D.m 
-        checkUnits3D.m Sift3DParser.m)
+        matchSift3D.m checkUnits3D.m Sift3DParser.m)
 set (TEST_SCRIPTS Sift3DTest.m)
 
 # Build the mex utility library
@@ -51,9 +55,14 @@ matlab_add_mex (NAME mexRegisterSift3D
         LINK_TO mexutil ${Matlab_LIBRARIES}
 )
 
+matlab_add_mex (NAME mexMatchSift3D
+        SRC mexMatchSift3D.c
+        LINK_TO mexutil ${Matlab_LIBRARIES}
+)
+
 # Enumerate the binary targets
 set (BINARIES mexutil mexImRead3D mexImWrite3D mexDetectSift3D 
-        mexOrientation3D mexExtractSift3D mexRegisterSift3D)
+        mexOrientation3D mexExtractSift3D mexRegisterSift3D mexMatchSift3D)
 
 # Configure the build destination
 set_target_properties (${BINARIES}
@@ -64,9 +73,9 @@ set_target_properties (${BINARIES}
 )
 
 # Copy the scripts and test suite to the build tree
-file (COPY ${INSTALL_SCRIPTS} ${TEST_SCRIPTS} 
-        DESTINATION ${BUILD_TOOLBOX_DIR}
-)
+foreach (FILENAME IN LISTS INSTALL_SCRIPTS TEST_SCRIPTS)
+        configure_file (${FILENAME} "${BUILD_TOOLBOX_DIR}/${FILENAME}" COPYONLY)
+endforeach ()
 
 # Install the matlab scripts
 install (FILES ${INSTALL_SCRIPTS} 

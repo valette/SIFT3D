@@ -2,12 +2,12 @@ function imWrite3D(path, im, units)
 %imWrite3D(im) Write a 3D image to a file.
 %  Arguments:
 %    path - The path to the file.
-%    im - An [MxNxP] array containing the image data, where the voxels 
-%       are indexed in (x, y, z) order.
+%    im - An [MxNxPxC] array containing the image data. See imRead3D.
 %    units - (Optional) See imRead3D. Missing values default to 1.
 %
 %  Supported file formats:
 %    NIFTI (.nii, .nii.gz)
+%    Analyze (.img, .img.gz)   
 %    DICOM (.dcm)
 %    Directory of DICOM files (no extension)
 %
@@ -17,10 +17,14 @@ function imWrite3D(path, im, units)
 %    imWrite3D('image', im); % Directory of DICOM slices
 %    imWrite3D('image.dcm', im, [1 1 2]) % Anisotropic, multi-slice DICOM  
 %
+%  Notes:
+%    When writing a DICOM file, the images values will be scaled and
+%    rounded to 8 unsigned bits.
+%
 %  See also:
 %    imRead3D, detectSift3D, extractSift3D, setupSift3D
 %
-% Copyright (c) 2015-2016 Blaine Rister et al., see LICENSE for details.
+% Copyright (c) 2015-2017 Blaine Rister et al., see LICENSE for details.
 
 % Default parameters
 if nargin < 3 || isempty(units)
@@ -40,14 +44,13 @@ if nargin < 2 || isempty(im)
     error('im not specified')
 end
 
-if ndims(im) > 3
+if ndims(im) > 4
    error(['im has invalid dimensionality: ' num2str(ndims(im))]) 
 end
 
 units = checkUnits3D(units);
 
-% Scale and convert the image to single-precision
-im = im / (max(im(:)) + eps);
+% Convert the image to single-precision
 im = single(im);
 
 % Check if this is a .gz file being written on Windows

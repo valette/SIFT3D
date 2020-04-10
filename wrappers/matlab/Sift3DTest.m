@@ -1,17 +1,17 @@
 classdef Sift3DTest < TestCase
 %Sift3DTest a test suite for SIFT3D.
 %
-% To run this test suite, you must have installed xUnit. As of August
-% 25th, 2015, xUnit is available at:
-%   http://www.mathworks.com/matlabcentral/fileexchange/22846-matlab-xunit-test-framework
+% To run this test suite, you must install xUnit. As of January
+% 12th, 2017, xUnit is available at:
+% http://www.mathworks.com/matlabcentral/fileexchange/47302-xunit4
 %
 % Run the tests with the following command:
-%   runtests
+%   runxunit
 %
 % This test suite can only be run from the build tree.
 %
-% Copyright (c) 2015-2016 Blaine Rister et al., see LICENSE for details.
-    
+% Copyright (c) 2015-2017 Blaine Rister et al., see LICENSE for details.
+
     properties (SetAccess = private)
         cd
         buildDir
@@ -95,7 +95,8 @@ classdef Sift3DTest < TestCase
             % Check the dimensions
             assertEqual(size(kpCli, 1), length(keys));
             assertEqual(size(kpCli, 2), numel(keys(1).coords) + ...
-                numel(keys(1).scale) + numel(keys(1).ori));
+                numel(keys(1).octave) + numel(keys(1).scale) + ...
+                numel(keys(1).ori));
             
             % Compare the two
             for i = 1 : length(keys)
@@ -107,13 +108,16 @@ classdef Sift3DTest < TestCase
                 assertElementsAlmostEqual(mKey.coords, cliKey(1:3), ...
                     'absolute', self.tolText);
                 
+                % Check the octave
+                assertEqual(mKey.octave, cliKey(4));
+                
                 % Check the scale
-                assertElementsAlmostEqual(mKey.scale, cliKey(4), ...
+                assertElementsAlmostEqual(mKey.scale, cliKey(5), ...
                     'absolute', self.tolText);
                 
                 % Check the orientation
                 assertElementsAlmostEqual(mKey.ori, ...
-                    reshape(cliKey(5:end), size(mKey.ori))', ...
+                    reshape(cliKey(6:end), size(mKey.ori))', ...
                     'absolute', self.tolText);
             end
             
@@ -353,6 +357,37 @@ classdef Sift3DTest < TestCase
                 'absolute', 5);
         end
         
+        % Test matching descriptors against the C version
+        function matchTest(self)
+            
+            if ~self.fullTest
+                return
+            end
+            
+            % Load the images
+            [im1, units1] = imRead3D(self.im1Name);
+            [im2, units2] = imRead3D(self.im2Name);
+            
+            % Register with the C version and get the matches
+            [~, match1, match2] = registerSift3D(im1, im2, ...
+                'srcUnits', units1, 'refUnits', units2);
+            
+            % Extract descriptors from each image
+            keys = detectSift3D(im1, 'units', units1);
+            [desc1, coords1] = extractSift3D(keys);
+            keys = detectSift3D(im2, 'units', units2);
+            [desc2, coords2] = extractSift3D(keys);
+            
+            % Match with the Matlab version and convert to coordinates
+            matches = matchSift3D(desc1, coords1, desc2, coords2);
+            match1M = coords1(matches(:, 1), :);
+            match2M = coords2(matches(:, 2), :);
+            
+            assertElementsAlmostEqual(match1M, match1, 'relative', 1E-3);
+            assertElementsAlmostEqual(match2M, match2, 'relative', 1E-3);
+            
+        end
+        
         % Test registration with invalid matching threshold
         function regInvalidMatchTest(self)
             
@@ -407,9 +442,8 @@ classdef Sift3DTest < TestCase
             % The temporary file name
             imName = 'temp.nii.gz';
             
-            % Make random image data, scaled to the range [0, 1]
+            % Make random image data
             imWritten = rand(10, 15, 20);
-            imWritten = imWritten / max(imWritten(:));
             
             % Write the image as a NIFTI file
             imWrite3D(imName, imWritten);
@@ -442,8 +476,9 @@ classdef Sift3DTest < TestCase
             % Write the image as a DICOM file
             imWrite3D(imName, imWritten);
             
-            % Read the image back
+            % Read the image back and scale it
             imRead = imRead3D(imName);
+            imRead = imRead / max(imRead(:));
             
             % Clean up
             delete(imName);
@@ -465,8 +500,9 @@ classdef Sift3DTest < TestCase
             % Write the image as a DICOM file
             imWrite3D(dirName, imWritten);
             
-            % Read the image back
+            % Read the image back and scale it
             imRead = imRead3D(dirName);
+            imRead = imRead / max(imRead(:));
             
             % Clean up
             rmdir(dirName, 's');
@@ -480,9 +516,8 @@ classdef Sift3DTest < TestCase
             % The temporary file name
             imName = 'temp.nii.gz';
             
-            % Make random image data, scaled to the range [0, 1]
+            % Make random image data
             imWritten = rand(20, 15);
-            imWritten = imWritten / max(imWritten(:));
             
             % Write the image as a NIFTI file
             imWrite3D(imName, imWritten);
@@ -507,11 +542,12 @@ classdef Sift3DTest < TestCase
             imWritten = rand(20, 15);
             imWritten = imWritten / max(imWritten(:));
             
-            % Write the image as a NIFTI file
+            % Write the image as a DICOM file
             imWrite3D(imName, imWritten);
             
-            % Read the image back
+            % Read the image back and scale it
             imRead = imRead3D(imName);
+            imRead = imRead / max(imRead(:));
             
             % Clean up
             delete(imName);
