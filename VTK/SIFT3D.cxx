@@ -314,7 +314,7 @@ int main( int argc, char *argv[] )
 
 		pointsFile << "1,"; //point.laplacian;
 
-		pointsFile << std::fixed << des->rd; //point.response;
+		pointsFile << std::fixed << des->rd << ","; //point.response;
 
 		// write the feature vector
 		for ( unsigned int j = 0; j < 768 ; j++) {
